@@ -1,0 +1,13 @@
+.ipynb_checkpoints
+__pycache__
+training_data/seasons/
+training_data/day-night/
+training_data/theta.csv
+datasets/
+results/
+tests/
+notebooks/
+images/
+baselines/
+**/*.bak
+*.png
