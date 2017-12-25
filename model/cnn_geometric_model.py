@@ -6,7 +6,6 @@ import torchvision.models as models
 import numpy as np
 import numpy.matlib
 from util.torch_util import Softmax1D
-from util.conv4d import Conv4d, Linear4d
 from geotnf.transformation import GeometricTnf
 
 def featureL2Norm(feature):
@@ -110,62 +109,7 @@ class FeatureCorrelation(torch.nn.Module):
             
         return correlation_tensor
 
-class FeatureFiltering(nn.Module):
-    def __init__(self, use_cuda=True):
-        super(FeatureFiltering, self).__init__()
-        self.filter = nn.Sequential(
-            Conv4d(out_channels=10,kernel_size=5,bias=True),
-            nn.ReLU(inplace=True),
-            Linear4d(),
-            nn.ReLU(inplace=True),
-            Conv4d(out_channels=10,kernel_size=5,bias=True),
-            nn.ReLU(inplace=True),
-            Linear4d(),
-            nn.ReLU(inplace=True),
-        )
-        self.relu=nn.ReLU(inplace=True)
-        if use_cuda:
-            self.filter.cuda()
 
-    def forward(self, x):
-        b,c,h,w,d,t=x.size()
-        f = self.filter(x)
-        x = torch.mul(x,f)
-        x = self.relu(x)
-        # reshape to '3D' correlation format
-        x = x.squeeze(1).view((b,h,w,d*t)).transpose(2,3).transpose(1,2)
-        return x
-    
-# class FeatureRegression(nn.Module):
-#     def __init__(self, output_dim=6, use_cuda=True, batch_normalization=True, channels_1=128, channels_2=64):
-#         super(FeatureRegression, self).__init__()
-#         if batch_normalization:
-#             self.conv = nn.Sequential(
-#                 nn.Conv2d(225, channels_1, kernel_size=7, padding=0),
-#                 nn.BatchNorm2d(channels_1),
-#                 nn.ReLU(inplace=True),
-#                 nn.Conv2d(channels_1, channels_2, kernel_size=5, padding=0),
-#                 nn.BatchNorm2d(channels_2),
-#                 nn.ReLU(inplace=True),
-#             )
-#         else:
-#             self.conv = nn.Sequential(
-#                 nn.Conv2d(225, channels_1, kernel_size=7, padding=0),
-#                 nn.ReLU(inplace=True),
-#                 nn.Conv2d(channels_1, channels_2, kernel_size=5, padding=0),
-#                 nn.ReLU(inplace=True),
-#             )
-#         self.linear = nn.Linear(channels_2 * 5 * 5, output_dim)
-#         if use_cuda:
-#             self.conv.cuda()
-#             self.linear.cuda()
-
-#     def forward(self, x):
-#         x = self.conv(x)
-#         x = x.view(x.size(0), -1)
-#         x = self.linear(x)
-#         return x
-    
 class FeatureRegression(nn.Module):
     def __init__(self, output_dim=6, use_cuda=True, batch_normalization=True, kernel_sizes=[7,5], channels=[128,64] ,feature_size=15):
         super(FeatureRegression, self).__init__()
