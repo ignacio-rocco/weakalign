@@ -128,7 +128,7 @@ if args.eval_dataset=='pf-pascal':
 elif args.eval_dataset=='caltech':
     Dataset = CaltechDataset
     collate_fn = default_collate
-    csv_file = 'test_pairs_caltech.csv'
+    csv_file = 'test_pairs_caltech_with_category.csv'
 elif args.eval_dataset=='tss':
     Dataset = TSSDataset
     collate_fn = default_collate

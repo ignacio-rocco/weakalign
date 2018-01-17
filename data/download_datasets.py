@@ -108,7 +108,7 @@ def download_caltech(dest="datasets/caltech-101"):
     print('Done renaming\n') ;
 
     print('Downloading image pair list \n') ;
-    url='http://www.di.ens.fr/willow/research/cnngeometric/other_resources/test_pairs_caltech.csv'
+    url='http://www.di.ens.fr/willow/research/weakalign/other_resources/test_pairs_caltech_with_category.csv'
     file_path = join(dest, basename(url))
     download_and_uncompress(url,file_path)
     
