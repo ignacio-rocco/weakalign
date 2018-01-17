@@ -101,10 +101,10 @@ def download_caltech(dest="datasets/caltech-101"):
     download_and_uncompress(url,file_path)
     
     print('Renaming some annotation directories\n') ;
-    os.rename(join(dest,'Annotations','Airplanes_Side_2'),join(dest,'Annotations','airplanes'))
-    os.rename(join(dest,'Annotations','Faces_2'),join(dest,'Annotations','Faces'))
-    os.rename(join(dest,'Annotations','Faces_3'),join(dest,'Annotations','Faces_easy'))
-    os.rename(join(dest,'Annotations','Motorbikes_16'),join(dest,'Annotations','Motorbikes'))
+    rename(join(dest,'Annotations','Airplanes_Side_2'),join(dest,'Annotations','airplanes'))
+    rename(join(dest,'Annotations','Faces_2'),join(dest,'Annotations','Faces'))
+    rename(join(dest,'Annotations','Faces_3'),join(dest,'Annotations','Faces_easy'))
+    rename(join(dest,'Annotations','Motorbikes_16'),join(dest,'Annotations','Motorbikes'))
     print('Done renaming\n') ;
 
     print('Downloading image pair list \n') ;
