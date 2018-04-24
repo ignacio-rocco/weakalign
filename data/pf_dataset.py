@@ -103,7 +103,7 @@ class PFPascalDataset(Dataset):
         
     """
 
-    def __init__(self, csv_file, dataset_path, output_size=(240,240), transform=None, category=None):
+    def __init__(self, csv_file, dataset_path, output_size=(240,240), transform=None, category=None, pck_procedure='scnet'):
 
         self.category_names=['aeroplane','bicycle','bird','boat','bottle','bus','car','cat','chair','cow','diningtable','dog','horse','motorbike','person','pottedplant','sheep','sofa','train','tvmonitor']
         self.out_h, self.out_w = output_size
@@ -121,6 +121,7 @@ class PFPascalDataset(Dataset):
         self.transform = transform
         # no cuda as dataset is called from CPU threads in dataloader and produces confilct
         self.affineTnf = GeometricTnf(out_h=self.out_h, out_w=self.out_w, use_cuda = False) 
+        self.pck_procedure = pck_procedure
               
     def __len__(self):
         return len(self.pairs)
@@ -135,7 +136,22 @@ class PFPascalDataset(Dataset):
         point_B_coords = self.get_points(self.point_B_coords,idx)
         
         # compute PCK reference length L_pck (equal to max bounding box side in image_A)
-        L_pck = torch.FloatTensor([torch.max(point_A_coords.max(1)[0]-point_A_coords.min(1)[0])])
+        N_pts = torch.sum(torch.ne(point_A_coords[0,:],-1))
+
+        if self.pck_procedure=='pf':
+            L_pck = torch.FloatTensor([torch.max(point_A_coords[:,:N_pts].max(1)[0]-point_A_coords[:,:N_pts].min(1)[0])])
+        elif self.pck_procedure=='scnet':
+            #modification to follow the evaluation procedure of SCNet
+            point_A_coords[0,0:N_pts]=point_A_coords[0,0:N_pts]*224/im_size_A[1]
+            point_A_coords[1,0:N_pts]=point_A_coords[1,0:N_pts]*224/im_size_A[0]
+
+            point_B_coords[0,0:N_pts]=point_B_coords[0,0:N_pts]*224/im_size_B[1]
+            point_B_coords[1,0:N_pts]=point_B_coords[1,0:N_pts]*224/im_size_B[0]
+
+            im_size_A[0:2]=torch.FloatTensor([224,224])
+            im_size_B[0:2]=torch.FloatTensor([224,224])
+
+            L_pck = torch.FloatTensor([224.0])
                 
         sample = {'source_image': image_A, 'target_image': image_B, 'source_im_size': im_size_A, 'target_im_size': im_size_B, 'source_points': point_A_coords, 'target_points': point_B_coords, 'L_pck': L_pck}
         

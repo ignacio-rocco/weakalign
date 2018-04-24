@@ -10,47 +10,8 @@ from data.caltech_dataset import CaltechDataset
 from torch.autograd import Variable
 from geotnf.point_tnf import PointTnf, PointsToUnitCoords, PointsToPixelCoords
 from util.py_util import create_file_path
+from model.loss import WeakInlierCount, TwoStageWeakInlierCount
 
-def theta_to_sampling_grid(out_h,out_w,theta_aff=None,theta_tps=None,theta_aff_tps=None,use_cuda=True,tps_reg_factor=0):
-    affTnf = GeometricTnf(out_h=out_h,out_w=out_w,geometric_model='affine',use_cuda=use_cuda)
-    tpsTnf = GeometricTnf(out_h=out_h,out_w=out_w,geometric_model='tps',use_cuda=use_cuda,tps_reg_factor=tps_reg_factor)
-
-    if theta_aff is not None:
-        sampling_grid_aff = affTnf(image_batch=None,
-                                               theta_batch=theta_aff.view(1,2,3),
-                                               return_sampling_grid=True,
-                                               return_warped_image=False)
-    else:
-        sampling_grid_aff=None
-    
-    if theta_tps is not None:
-        sampling_grid_tps = tpsTnf(image_batch=None,
-                                               theta_batch=theta_tps.view(1,-1),
-                                               return_sampling_grid=True,
-                                               return_warped_image=False)
-    else:
-        sampling_grid_tps=None
-        
-    if theta_aff is not None and theta_aff_tps is not None:
-        sampling_grid_aff_tps = tpsTnf(image_batch=None,
-                                   theta_batch=theta_aff_tps.view(1,-1),
-                                   return_sampling_grid=True,
-                                   return_warped_image=False)
-        
-        # put 1e10 value in region out of bounds of sampling_grid_aff
-        sampling_grid_aff = sampling_grid_aff.clone()
-        in_bound_mask_aff=Variable((sampling_grid_aff.data[:,:,:,0]>-1) & (sampling_grid_aff.data[:,:,:,0]<1) & (sampling_grid_aff.data[:,:,:,1]>-1) & (sampling_grid_aff.data[:,:,:,1]<1)).unsqueeze(3)
-        in_bound_mask_aff=in_bound_mask_aff.expand_as(sampling_grid_aff)
-        sampling_grid_aff = torch.add((in_bound_mask_aff.float()-1)*(1e10),torch.mul(in_bound_mask_aff.float(),sampling_grid_aff))       
-        # put 1e10 value in region out of bounds of sampling_grid_aff_tps_comp
-        sampling_grid_aff_tps_comp = F.grid_sample(sampling_grid_aff.transpose(2,3).transpose(1,2), sampling_grid_aff_tps).transpose(1,2).transpose(2,3)
-        in_bound_mask_aff_tps=Variable((sampling_grid_aff_tps.data[:,:,:,0]>-1) & (sampling_grid_aff_tps.data[:,:,:,0]<1) & (sampling_grid_aff_tps.data[:,:,:,1]>-1) & (sampling_grid_aff_tps.data[:,:,:,1]<1)).unsqueeze(3)
-        in_bound_mask_aff_tps=in_bound_mask_aff_tps.expand_as(sampling_grid_aff_tps_comp)
-        sampling_grid_aff_tps_comp = torch.add((in_bound_mask_aff_tps.float()-1)*(1e10),torch.mul(in_bound_mask_aff_tps.float(),sampling_grid_aff_tps_comp))       
-    else:
-        sampling_grid_aff_tps_comp = None
-
-    return (sampling_grid_aff,sampling_grid_tps,sampling_grid_aff_tps_comp) 
 
 def compute_metric(metric,model,dataset,dataloader,batch_tnf,batch_size,two_stage=True,do_aff=False,do_tps=False,args=None):
     # Initialize stats
@@ -81,6 +42,10 @@ def compute_metric(metric,model,dataset,dataloader,batch_tnf,batch_size,two_stag
     elif metric=='flow':
         metrics = ['flow']
         metric_fun = flow_metrics
+    elif metric=='inlier_count':
+        metrics = ['inlier_count']
+        metric_fun = inlier_count
+        model.return_correlation = True
     # initialize vector for storing results for each metric
     for key in stats.keys():
         for metric in metrics:
@@ -104,36 +69,43 @@ def compute_metric(metric,model,dataset,dataloader,batch_tnf,batch_size,two_stag
                 theta_aff,theta_aff_tps,corr_aff,corr_aff_tps=model(batch)
         elif do_aff:
             theta_aff=model(batch)
+            if isinstance(theta_aff,tuple):
+                theta_aff=theta_aff[0]
         elif do_tps:
             theta_tps=model(batch)   
-            
-        if metric_fun is not None:
+            if isinstance(theta_tps,tuple):
+                theta_tps=theta_tps[0]
+        
+        if metric=='inlier_count':
+            stats = inlier_count(batch,batch_start_idx,theta_aff,theta_tps,theta_aff_tps,corr_aff,corr_aff_tps,stats,args)
+        elif metric_fun is not None:
             stats = metric_fun(batch,batch_start_idx,theta_aff,theta_tps,theta_aff_tps,stats,args)
             
         print('Batch: [{}/{} ({:.0f}%)]'.format(i, len(dataloader), 100. * i / len(dataloader)))
 
+    # Print results
+    if metric == 'flow':
+        print('Flow files have been saved to '+args.flow_output_dir)
+        return stats
+
     for key in stats.keys():
         print('=== Results '+key+' ===')
         for metric in metrics:
-            results=stats[key][metric]
-            good_idx = np.flatnonzero((results!=-1) * ~np.isnan(results))
-            print('Total: '+str(results.size))
-            print('Valid: '+str(good_idx.size)) 
-#            import pdb; pdb.set_trace()
-            filtered_results = results[good_idx]
-            print(metric+':','{:.2%}'.format(np.mean(filtered_results)))
-            if isinstance(dataset,CaltechDataset) and key=='aff_tps' and metric=='intersection_over_union':
+            # print per-class brakedown for PFPascal, or caltech
+            if isinstance(dataset,PFPascalDataset):
                 N_cat = int(np.max(dataset.category))
                 for c in range(N_cat):
                     cat_idx = np.nonzero(dataset.category==c+1)[0]
                     print(dataset.category_names[c].ljust(15)+': ','{:.2%}'.format(np.mean(stats[key][metric][cat_idx])))
-                    
-        if isinstance(dataset,PFPascalDataset):
-            N_cat = int(np.max(dataset.category))
-            for c in range(N_cat):
-                cat_idx = np.nonzero(dataset.category==c+1)[0]
-                print(dataset.category_names[c].ljust(15)+': ','{:.2%}'.format(np.mean(stats[key][metric][cat_idx])))
-                
+
+            # print mean value
+            results=stats[key][metric]
+            good_idx = np.flatnonzero((results!=-1) * ~np.isnan(results))
+            print('Total: '+str(results.size))
+            print('Valid: '+str(good_idx.size)) 
+            filtered_results = results[good_idx]
+            print(metric+':','{:.2%}'.format(np.mean(filtered_results)))
+
         print('\n')
         
     return stats
@@ -224,6 +196,17 @@ def point_dist_metric(batch,batch_start_idx,theta_aff,theta_tps,theta_aff_tps,st
         
     return stats
 
+def inlier_count(batch,batch_start_idx,theta_aff,theta_tps,theta_aff_tps,corr_aff,corr_aff_tps,stats,args,use_cuda=True):
+    inliersComposed = TwoStageWeakInlierCount(use_cuda=torch.cuda.is_available(),dilation_filter=0,normalize_inlier_count=True)
+    inliers_comp = inliersComposed(matches=corr_aff,theta_aff=theta_aff,theta_aff_tps=theta_aff_tps)
+    current_batch_size=batch['source_im_size'].size(0)
+    indices = range(batch_start_idx,batch_start_idx+current_batch_size)
+    
+    stats['aff_tps']['inlier_count'][indices] = inliers_comp.unsqueeze(1).cpu().data.numpy()
+
+    return stats
+
+
 def pck_metric(batch,batch_start_idx,theta_aff,theta_tps,theta_aff_tps,stats,args,use_cuda=True):
     alpha = args.pck_alpha
     do_aff = theta_aff is not None
@@ -264,7 +247,7 @@ def pck_metric(batch,batch_start_idx,theta_aff,theta_tps,theta_aff_tps,stats,arg
     current_batch_size=batch['source_im_size'].size(0)
     indices = range(batch_start_idx,batch_start_idx+current_batch_size)
 
-#    import pdb; pdb.set_trace()
+    # import pdb; pdb.set_trace()
 
     if do_aff:
         pck_aff = pck(source_points.data, warped_points_aff.data, L_pck, alpha)
@@ -352,8 +335,7 @@ def pascal_parts_metrics(batch,batch_start_idx,theta_aff,theta_tps,theta_aff_tps
         if do_aff_tps:
             warped_mask_aff_tps = F.grid_sample(source_mask, grid_aff_tps)           
             stats['aff_tps']['intersection_over_union'][idx] = intersection_over_union(warped_mask_aff_tps,target_mask)
-#        if idx==300:
-#            import pdb; pdb.set_trace()
+
     return stats
 
 def area_metrics(batch,batch_start_idx,theta_aff,theta_tps,theta_aff_tps,stats,args,use_cuda=True):
@@ -362,6 +344,9 @@ def area_metrics(batch,batch_start_idx,theta_aff,theta_tps,theta_aff_tps,stats,a
     do_aff_tps = theta_aff_tps is not None
     
     batch_size=batch['source_im_size'].size(0)
+
+    pt=PointTnf(use_cuda=use_cuda)
+
     for b in range(batch_size):
         h_src = int(batch['source_im_size'][b,0].data.cpu().numpy())
         w_src = int(batch['source_im_size'][b,1].data.cpu().numpy())
@@ -376,16 +361,27 @@ def area_metrics(batch,batch_start_idx,theta_aff,theta_tps,theta_aff_tps,stats,a
                                                       batch['source_polygon'][1][b],
                                                       h_src,w_src,use_cuda=use_cuda)
 
-        grid_aff,grid_tps,grid_aff_tps=theta_to_sampling_grid(h_tgt,w_tgt,
-                                                              theta_aff[b,:] if do_aff else None,
-                                                              theta_tps[b,:] if do_tps else None,
-                                                              theta_aff_tps[b,:] if do_aff_tps else None,
-                                                              use_cuda=use_cuda,
-                                                              tps_reg_factor=args.tps_reg_factor)
-        
+        grid_X,grid_Y = np.meshgrid(np.linspace(-1,1,w_tgt),np.linspace(-1,1,h_tgt))
+        grid_X = torch.FloatTensor(grid_X).unsqueeze(0).unsqueeze(3)
+        grid_Y = torch.FloatTensor(grid_Y).unsqueeze(0).unsqueeze(3)
+        grid_X = Variable(grid_X,requires_grad=False)
+        grid_Y = Variable(grid_Y,requires_grad=False)
+
+        if use_cuda:
+            grid_X = grid_X.cuda()
+            grid_Y = grid_Y.cuda()
+
+        grid_X_vec = grid_X.view(1,1,-1)
+        grid_Y_vec = grid_Y.view(1,1,-1)
+
+        grid_XY_vec = torch.cat((grid_X_vec,grid_Y_vec),1)        
+
+        def pointsToGrid (x,h_tgt=h_tgt,w_tgt=w_tgt): return x.contiguous().view(1,2,h_tgt,w_tgt).transpose(1,2).transpose(2,3)
+
         idx = batch_start_idx+b
         
         if do_aff:
+            grid_aff = pointsToGrid(pt.affPointTnf(theta_aff[b,:].unsqueeze(0),grid_XY_vec))
             warped_mask_aff = F.grid_sample(source_mask, grid_aff)            
             flow_aff = th_sampling_grid_to_np_flow(source_grid=grid_aff,h_src=h_src,w_src=w_src)
             
@@ -393,6 +389,7 @@ def area_metrics(batch,batch_start_idx,theta_aff,theta_tps,theta_aff_tps,stats,a
             stats['aff']['label_transfer_accuracy'][idx] = label_transfer_accuracy(warped_mask_aff,target_mask)
             stats['aff']['localization_error'][idx] = localization_error(source_mask_np, target_mask_np, flow_aff)
         if do_tps:
+            grid_tps = pointsToGrid(pt.tpsPointTnf(theta_tps[b,:].unsqueeze(0),grid_XY_vec))
             warped_mask_tps = F.grid_sample(source_mask, grid_tps)
             flow_tps = th_sampling_grid_to_np_flow(source_grid=grid_tps,h_src=h_src,w_src=w_src)
             
@@ -400,6 +397,7 @@ def area_metrics(batch,batch_start_idx,theta_aff,theta_tps,theta_aff_tps,stats,a
             stats['tps']['label_transfer_accuracy'][idx] = label_transfer_accuracy(warped_mask_tps,target_mask)
             stats['tps']['localization_error'][idx] = localization_error(source_mask_np, target_mask_np, flow_tps)
         if do_aff_tps:
+            grid_aff_tps = pointsToGrid(pt.affPointTnf(theta_aff[b,:].unsqueeze(0),pt.tpsPointTnf(theta_aff_tps[b,:].unsqueeze(0),grid_XY_vec)))
             warped_mask_aff_tps = F.grid_sample(source_mask, grid_aff_tps)
             flow_aff_tps = th_sampling_grid_to_np_flow(source_grid=grid_aff_tps,h_src=h_src,w_src=w_src)
             
@@ -416,6 +414,8 @@ def flow_metrics(batch,batch_start_idx,theta_aff,theta_tps,theta_aff_tps,stats,a
     do_aff = theta_aff is not None
     do_tps = theta_tps is not None
     do_aff_tps = theta_aff_tps is not None
+
+    pt=PointTnf(use_cuda=use_cuda)
     
     batch_size=batch['source_im_size'].size(0)
     for b in range(batch_size):
@@ -424,28 +424,42 @@ def flow_metrics(batch,batch_start_idx,theta_aff,theta_tps,theta_aff_tps,stats,a
         h_tgt = int(batch['target_im_size'][b,0].data.cpu().numpy())
         w_tgt = int(batch['target_im_size'][b,1].data.cpu().numpy())
 
-        grid_aff,grid_tps,grid_aff_tps=theta_to_sampling_grid(h_tgt,w_tgt,
-                                                              theta_aff[b,:] if do_aff else None,
-                                                              theta_tps[b,:] if do_tps else None,
-                                                              theta_aff_tps[b,:] if do_aff_tps else None,
-                                                              use_cuda=use_cuda,
-                                                              tps_reg_factor=args.tps_reg_factor)
-        
-        if do_aff_tps:
-            flow_aff_tps = th_sampling_grid_to_np_flow(source_grid=grid_aff_tps,h_src=h_src,w_src=w_src)
-            flow_aff_tps_path = os.path.join(result_path,'aff_tps',batch['flow_path'][b])
-            create_file_path(flow_aff_tps_path)
-            write_flo_file(flow_aff_tps,flow_aff_tps_path)
-        elif do_aff:
+        grid_X,grid_Y = np.meshgrid(np.linspace(-1,1,w_tgt),np.linspace(-1,1,h_tgt))
+        grid_X = torch.FloatTensor(grid_X).unsqueeze(0).unsqueeze(3)
+        grid_Y = torch.FloatTensor(grid_Y).unsqueeze(0).unsqueeze(3)
+        grid_X = Variable(grid_X,requires_grad=False)
+        grid_Y = Variable(grid_Y,requires_grad=False)
+        if use_cuda:
+            grid_X = grid_X.cuda()
+            grid_Y = grid_Y.cuda()
+
+        grid_X_vec = grid_X.view(1,1,-1)
+        grid_Y_vec = grid_Y.view(1,1,-1)
+
+        grid_XY_vec = torch.cat((grid_X_vec,grid_Y_vec),1)        
+
+        def pointsToGrid (x,h_tgt=h_tgt,w_tgt=w_tgt): return x.contiguous().view(1,2,h_tgt,w_tgt).transpose(1,2).transpose(2,3)
+
+        idx = batch_start_idx+b
+                
+        if do_aff:
+            grid_aff = pointsToGrid(pt.affPointTnf(theta_aff[b,:].unsqueeze(0),grid_XY_vec))
             flow_aff = th_sampling_grid_to_np_flow(source_grid=grid_aff,h_src=h_src,w_src=w_src)
             flow_aff_path = os.path.join(result_path,'aff',batch['flow_path'][b])
             create_file_path(flow_aff_path)
             write_flo_file(flow_aff,flow_aff_path)
-        elif do_tps:
+        if do_tps:
+            grid_tps = pointsToGrid(pt.tpsPointTnf(theta_tps[b,:].unsqueeze(0),grid_XY_vec))
             flow_tps = th_sampling_grid_to_np_flow(source_grid=grid_tps,h_src=h_src,w_src=w_src)
             flow_tps_path = os.path.join(result_path,'tps',batch['flow_path'][b])
             create_file_path(flow_tps_path)
             write_flo_file(flow_tps,flow_tps_path)
+        if do_aff_tps:
+            grid_aff_tps = pointsToGrid(pt.affPointTnf(theta_aff[b,:].unsqueeze(0),pt.tpsPointTnf(theta_aff_tps[b,:].unsqueeze(0),grid_XY_vec)))
+            flow_aff_tps = th_sampling_grid_to_np_flow(source_grid=grid_aff_tps,h_src=h_src,w_src=w_src)
+            flow_aff_tps_path = os.path.join(result_path,'aff_tps',batch['flow_path'][b])
+            create_file_path(flow_aff_tps_path)
+            write_flo_file(flow_aff_tps,flow_aff_tps_path)
 
         idx = batch_start_idx+b
     return stats
